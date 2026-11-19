@@ -40,3 +40,7 @@ Log in to the secure portal to record real user-specific training activity withi
 ## Sign-in limit
 
 Five wrong passwords in 15 minutes, for one email or from one network address, blocks sign-in for the rest of that 15 minutes. Every block is in the audit log. Behind a reverse proxy, start uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy address>` so the limit sees each person's real address instead of the proxy's.
+
+## Preview website
+
+The visual preview in `site/` is published to GitHub Pages at https://jessekranz.github.io/caremed-academy/ on every push to `main` (`.github/workflows/pages.yml`). It is a prototype that keeps progress only in the viewer's browser. The secure portal in `app/` is not published there.
