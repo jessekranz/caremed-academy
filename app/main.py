@@ -45,6 +45,8 @@ def initdb():
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL, subject TEXT NOT NULL, event TEXT NOT NULL, occurred_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_attempt_user ON attempts(user_id,module_id);
         CREATE INDEX IF NOT EXISTS idx_audit_subject ON audit(subject);
+        CREATE TABLE IF NOT EXISTS login_failures(id INTEGER PRIMARY KEY, who TEXT NOT NULL, occurred_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(who,occurred_at);
         ''')
         if not c.execute('SELECT 1 FROM modules LIMIT 1').fetchone():
             curriculum=json.loads((BASE/'app'/'curriculum.json').read_text(encoding='utf-8'))
@@ -106,17 +108,38 @@ def root():return redirect('/dashboard')
 def login_form(request:Request):
     if user_session(request)[0]:return redirect('/dashboard')
     return page('Sign in','<div class="narrow">'+card('Secure sign in','<p>Use the employee account created by your CareMed administrator.</p><form action="/login" method="post">'+field('email','Work email',kind='email',extra='autocomplete="username"')+field('password','Password',kind='password',extra='autocomplete="current-password"')+'<button>Sign in</button></form>')+'</div>')
+MAX_FAILURES=5
+FAILURE_WINDOW=timedelta(minutes=15)
+def client_address(request):
+    return request.client.host if request.client else 'unknown'
+def login_keys(email,request):
+    return ('email:'+hashlib.sha256(email.encode()).hexdigest(),'ip:'+client_address(request))
+def too_many_failures(c,keys):
+    since=(datetime.now(timezone.utc)-FAILURE_WINDOW).isoformat()
+    for key in keys:
+        if c.execute('SELECT count(*) FROM login_failures WHERE who=? AND occurred_at>?',(key,since)).fetchone()[0]>=MAX_FAILURES:return True
+    return False
 @app.post('/login')
 def login(request:Request,email:str=Form(...),password:str=Form(...)):
+    email=email.strip().lower()
+    keys=login_keys(email,request)
     with db() as c:
-        row=c.execute('SELECT * FROM users WHERE email=? AND active=1',(email.strip().lower(),)).fetchone()
+        if too_many_failures(c,keys):
+            audit(c,None,'login_locked','account','Too many failed sign-ins')
+            return page('Sign in',msg('Too many failed sign-ins. Wait 15 minutes and try again, or ask your administrator.'))
+        row=c.execute('SELECT * FROM users WHERE email=? AND active=1',(email,)).fetchone()
         ok=False
         if row:
             try:ok=PH.verify(row['password_hash'],password)
             except (VerifyMismatchError,VerificationError):pass
+        else:
+            PH.hash(password)  # same work as a real check, so unknown emails aren't faster
         if not ok:
+            for key in keys:c.execute('INSERT INTO login_failures(who,occurred_at) VALUES(?,?)',(key,now()))
             audit(c,row['id'] if row else None,'login_failed','account', 'Rejected authentication')
             return page('Sign in',msg('Invalid email or password.')+'<p><a href="/login">Try again</a></p>')
+        c.execute('DELETE FROM login_failures WHERE who=?',(keys[0],))
+        c.execute('DELETE FROM login_failures WHERE occurred_at<?',((datetime.now(timezone.utc)-FAILURE_WINDOW).isoformat(),))
         token=secrets.token_urlsafe(40);digest=hashlib.sha256(token.encode()).hexdigest();csrf=secrets.token_urlsafe(32)
         exp=(datetime.now(timezone.utc)+timedelta(hours=8)).isoformat()
         c.execute('INSERT INTO sessions(token_hash,user_id,csrf,expires) VALUES(?,?,?,?)',(digest,row['id'],csrf,exp))
@@ -134,8 +157,8 @@ def logout(request:Request,csrf:str=Form(...)):
 def dashboard(request:Request):
     u=require(request)
     with db() as c:
-        passed=c.execute('SELECT count(distinct a.module_id) n FROM bank_attempts a JOIN modules m ON m.id=a.module_id WHERE a.user_id=? AND a.correct_count=a.total_count AND a.module_version=m.version AND m.status="approved"',(u['id'],)).fetchone()['n']
-        approved=c.execute('SELECT count(*) n FROM modules WHERE status="approved"').fetchone()['n']
+        passed=c.execute('SELECT count(distinct a.module_id) n FROM bank_attempts a JOIN modules m ON m.id=a.module_id WHERE a.user_id=? AND a.correct_count=a.total_count AND a.module_version=m.version AND m.status=\'approved\'',(u['id'],)).fetchone()['n']
+        approved=c.execute('SELECT count(*) n FROM modules WHERE status=\'approved\'').fetchone()['n']
         pending=c.execute('SELECT count(*) n FROM evaluations e LEFT JOIN reviews r ON r.evaluation_id=e.id WHERE r.id IS NULL').fetchone()['n'] if u['role']!='driver' else 0
     body='<div class="hero"><div><div class="eyebrow">CARED FOR. TRAINED WELL.</div><h1>Every ride begins with trust.</h1><p>Role-based training, credential checks and independently reviewed practical evaluations for Illinois accessible transportation.</p><a class="button" href="/courses">Explore training →</a></div><img src="/assets/images/caremed-hero.webp" alt="Illustrative accessible van and passenger at a clinic"></div>'
     body+='<div class="stats">'+card('Approved course completions',f'<div class="big">{passed} / {approved}</div><p>Draft lessons do not count toward qualification.</p>')+card('Your role',f'<div class="big">{e(u["role"].title())}</div><p>Access is enforced on the server.</p>')+card('Awaiting secondary review',f'<div class="big">{pending}</div><p>Instructor and admin approvals are independently recorded.</p>')+'</div>'
@@ -148,7 +171,8 @@ def courses(request:Request):
     with db() as c:rows=c.execute('SELECT * FROM modules ORDER BY id').fetchall()
     body='<h1>Learning paths</h1><p>Training content is in editorial review. Draft lessons are accessible for evaluation but do not count as approved completions.</p><div class="grid">'
     for m in rows:
-        body+=card(m['title'],f'<p>{e(m["body"].split("\n")[0])}</p><span class="tag">{e(m["status"].upper())} · v{m["version"]}</span><p><a class="button" href="/courses/{m["id"]}">Open lesson →</a></p>')
+        intro=m['body'].split('\n')[0]
+        body+=card(m['title'],f'<p>{e(intro)}</p><span class="tag">{e(m["status"].upper())} · v{m["version"]}</span><p><a class="button" href="/courses/{m["id"]}">Open lesson →</a></p>')
     return page('Courses',body+'</div>',u)
 @app.get('/courses/{module_id}')
 def course(request:Request,module_id:int):
@@ -206,7 +230,7 @@ def credentials_post(request:Request,csrf:str=Form(...),kind:str=Form(...),refer
     try:datetime.strptime(expires_on,'%Y-%m-%d')
     except ValueError:raise HTTPException(400)
     with db() as c:
-        c.execute('INSERT INTO credentials(user_id,kind,reference,expires_on,status,verified_by,verified_at) VALUES(?,?,?,?,"pending",NULL,NULL) ON CONFLICT(user_id,kind) DO UPDATE SET reference=excluded.reference,expires_on=excluded.expires_on,status="pending",verified_by=NULL,verified_at=NULL',(u['id'],kind,reference.strip(),expires_on))
+        c.execute('INSERT INTO credentials(user_id,kind,reference,expires_on,status,verified_by,verified_at) VALUES(?,?,?,?,\'pending\',NULL,NULL) ON CONFLICT(user_id,kind) DO UPDATE SET reference=excluded.reference,expires_on=excluded.expires_on,status=\'pending\',verified_by=NULL,verified_at=NULL',(u['id'],kind,reference.strip(),expires_on))
         audit(c,u['id'],'credential_submitted',f'user:{u["id"]}',kind)
     return redirect('/credentials')
 
@@ -223,7 +247,7 @@ def evaluations(request:Request):
         who=x['driver'] if 'driver' in x.keys() else u['name']
         body+=card(f'Evaluation #{x["id"]} · {who}',f'<p>Instructor: {e(x["instructor"])} · Result: {e(x["result"].upper())} · Review: {e(x["decision"] or "AWAITING REVIEW")}</p><p>Vehicle: {e(x["vehicle_reference"])} · Equipment: {e(x["equipment_reference"])}</p>')
     if u['role']=='instructor':
-        with db() as c:drivers=c.execute('SELECT id,name,email FROM users WHERE role="driver" AND active=1 ORDER BY name').fetchall()
+        with db() as c:drivers=c.execute('SELECT id,name,email FROM users WHERE role=\'driver\' AND active=1 ORDER BY name').fetchall()
         opts=''.join(f'<option value="{x["id"]}">{e(x["name"])} ({e(x["email"])})</option>' for x in drivers)
         form='<form action="/evaluations" method="post">'+cs(u)+f'<label>Driver<select name="driver_id" required>{opts}</select></label>'+field('vehicle_reference','Vehicle VIN or fleet identifier')+field('equipment_reference','Actual ramp + tie-down make/model/serial')+field('observed_at','Observed date',kind='date')
         form+='<fieldset><legend>Observed competencies (mark only when personally witnessed)</legend>'
@@ -242,7 +266,7 @@ async def evaluations_post(request:Request):
     if len(vehicle)<3 or len(equipment)<5 or not 20<=len(notes)<=3000 or result not in {'pass','fail'}:raise HTTPException(400)
     if result=='pass' and (not critical or len(checks)!=len(CRITERIA)):raise HTTPException(400,'Cannot pass without every competency and critical-safety confirmation')
     with db() as c:
-        driver=c.execute('SELECT id FROM users WHERE id=? AND role="driver" AND active=1',(driver_id,)).fetchone()
+        driver=c.execute('SELECT id FROM users WHERE id=? AND role=\'driver\' AND active=1',(driver_id,)).fetchone()
         if not driver:raise HTTPException(400,'Invalid driver')
         cur=c.execute('INSERT INTO evaluations(driver_id,instructor_id,vehicle_reference,equipment_reference,checklist,critical_pass,result,notes,observed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(driver_id,u['id'],vehicle,equipment,json.dumps(sorted(checks)),int(critical),result,notes,observed_at,now()))
         audit(c,u['id'],'evaluation_signed',f'evaluation:{cur.lastrowid}',f'Observed result: {result}; vehicle={vehicle}; complete={len(checks)}')
@@ -253,7 +277,7 @@ def admin(request:Request):
     u=require(request,{'admin'})
     with db() as c:
         users=c.execute('SELECT id,email,name,role,active FROM users ORDER BY id DESC LIMIT 100').fetchall()
-        pending=c.execute('SELECT x.*,u.name driver FROM credentials x JOIN users u ON u.id=x.user_id WHERE x.status="pending" ORDER BY x.id').fetchall()
+        pending=c.execute('SELECT x.*,u.name driver FROM credentials x JOIN users u ON u.id=x.user_id WHERE x.status=\'pending\' ORDER BY x.id').fetchall()
         reviews=c.execute('SELECT e.*,d.name driver,i.name instructor FROM evaluations e JOIN users d ON d.id=e.driver_id JOIN users i ON i.id=e.instructor_id LEFT JOIN reviews r ON r.evaluation_id=e.id WHERE r.id IS NULL ORDER BY e.id').fetchall()
         mods=c.execute('SELECT id,title,status,version FROM modules ORDER BY id').fetchall()
         logs=c.execute('SELECT a.*,u.email FROM audit a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 35').fetchall()
@@ -288,7 +312,7 @@ def verify_credential(request:Request,credential_id:int,csrf:str=Form(...),decis
     u=require(request,{'admin'});verify_csrf(request,u,csrf)
     if decision not in {'verified','rejected'}:raise HTTPException(400)
     with db() as c:
-        x=c.execute('SELECT * FROM credentials WHERE id=? AND status="pending"',(credential_id,)).fetchone()
+        x=c.execute('SELECT * FROM credentials WHERE id=? AND status=\'pending\'',(credential_id,)).fetchone()
         if not x:raise HTTPException(404)
         if x['user_id']==u['id']:raise HTTPException(403,'No self-verification')
         c.execute('UPDATE credentials SET status=?,verified_by=?,verified_at=? WHERE id=?',(decision,u['id'],now(),credential_id))

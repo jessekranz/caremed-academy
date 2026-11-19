@@ -52,3 +52,22 @@ def test_no_public_admin():
     c=TestClient(app)
     assert c.get('/admin').status_code==401
     assert c.get('/healthz').json()['status']=='ok'
+
+def test_wrong_passwords_lock_the_account_for_15_minutes():
+    new_user('locked','driver')
+    c=TestClient(app,follow_redirects=False)
+    for _ in range(5):
+        r=c.post('/login',data={'email':'locked@example.test','password':'wrong-password-123'})
+        assert 'Invalid email or password' in r.text
+    r=c.post('/login',data={'email':'locked@example.test','password':'SecureTestPassword!99'})
+    assert r.status_code==200 and 'Too many failed sign-ins' in r.text and 'caremed_session' not in r.cookies
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM audit WHERE action='login_locked'").fetchone()[0]>=1
+        conn.execute('DELETE FROM login_failures')
+    assert c.post('/login',data={'email':'locked@example.test','password':'SecureTestPassword!99'}).status_code==303
+
+def test_queries_work_when_sqlite_rejects_double_quoted_text():
+    source=(Path(__file__).resolve().parent.parent/'app'/'main.py').read_text(encoding='utf-8')
+    for line in source.splitlines():
+        if 'execute(' in line:
+            assert not re.search(r'="(approved|pending|driver|draft)"',line),line

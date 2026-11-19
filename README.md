@@ -36,3 +36,7 @@ The seven full-length **filming scripts/storyboards** are in `docs/VIDEO-PRODUCT
 ## Server-side versus visual demo
 
 Log in to the secure portal to record real user-specific training activity within this pilot database. Do not use `site/index.html` for qualifications. The pilot enforces instructor observation and distinct admin review, but DOES NOT declare any driver ready for transport or generate state certification. No rider data should be entered.
+
+## Sign-in limit
+
+Five wrong passwords in 15 minutes, for one email or from one network address, blocks sign-in for the rest of that 15 minutes. Every block is in the audit log. Behind a reverse proxy, start uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy address>` so the limit sees each person's real address instead of the proxy's.
