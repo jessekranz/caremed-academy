@@ -20,7 +20,7 @@
 - Audit trail is append-only at application layer but **not tamper-proof against a DBA/server administrator**. Export to immutable storage/SIEM with external timestamping.
 - No uploaded evidence attachments, privacy consent collection, driver photograph/license validation, supervisor identity proofing, digital signatures meeting a specific legal e-sign standard, or external registry lookup.
 - No formal course/assessment approval workflow beyond an admin editorial status; no manufacturer or HFS certification is implied.
-- No dispatch integration or legal driver authorization, by design.
+- Dispatch integration is outside this portal. Transport authorization defaults to disabled, and the employee eligibility endpoint checks current prerequisites and a signed compliance decision when enabled.
 - No reviewed HIPAA compliance claim. Do not store rider, trip or medical information.
 - No tenant isolation, accessibility certification, professional security audit, high-availability guarantees, backups or incident response integrations supplied.
 - TLS proxy config, host validation, secure proxy trust, external secrets handling and request/response limits must be hardened per hosting environment.

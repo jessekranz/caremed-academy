@@ -35,7 +35,15 @@ The seven full-length **filming scripts/storyboards** are in `docs/VIDEO-PRODUCT
 
 ## Server-side versus visual demo
 
-Log in to the secure portal to record real user-specific training activity within this pilot database. Do not use `site/index.html` for qualifications. The pilot enforces instructor observation and distinct admin review, but DOES NOT declare any driver ready for transport or generate state certification. No rider data should be entered.
+Log in to the secure portal to record real user-specific training activity within this pilot database. Do not use `site/index.html` for qualifications. The pilot enforces instructor observation and distinct admin review. The state credential must come from an external source. No rider data should be entered.
+
+## Driver onboarding
+
+The secure portal displays the driver's current stage, examination results and required credential status. Instructors document supervised training and schedule and sign practical examinations. Administrators verify records, independently review practical exams, and approve or withdraw driver compliance.
+
+The portal checks a current driver license, Illinois HFS safety training certificate and insurance eligibility. Local permits and CPR can be tracked as additional records. The written exam uses the approved academy question bank and requires all answers correct. The portal flags required records within 30 days of expiry.
+
+Transport authorization is disabled by default. If CareMed approves operational use, set `CAREMED_TRANSPORT_ENABLED=1` to enable the authorization check. `GET /transport-authorization` checks the signed-in driver's current status and returns 403 unless all gates and a current compliance approval are present. A dispatch integration would need to enforce those same requirements when accepting a trip. This repository has no trip acceptance system. Pending renewals and changed evidence require fresh verification and compliance approval. Previously recorded practical observations remain in the history. An appointment-linked practical examination is required for the onboarding workflow.
 
 ## Sign-in limit
 

@@ -1,5 +1,5 @@
 """CareMed Academy secure pilot: server-side authorization, audit and instructor workflow.
-Not a regulatory approval or an operational driver dispatch release system.
+Includes a pilot-gated check for current CareMed transport eligibility.
 """
 import os, sqlite3, secrets, hashlib, hmac, json, re
 from pathlib import Path
@@ -7,15 +7,17 @@ from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
+from app.onboarding import CREDENTIALS, SCHEMA, STAGES, driver_state, fingerprint, illinois_date, illinois_now, illinois_today
 
 BASE=Path(__file__).resolve().parent.parent
 DB=Path(os.getenv('CAREMED_DB', str(BASE/'data'/'academy.sqlite3')))
 DB.parent.mkdir(parents=True, exist_ok=True)
 SECURE=os.getenv('CAREMED_SECURE_COOKIES','1') != '0'
+TRANSPORT_ENABLED=os.getenv('CAREMED_TRANSPORT_ENABLED') == '1'
 PH=PasswordHasher(time_cost=3,memory_cost=65536,parallelism=2)
 app=FastAPI(title='CareMed Academy secure pilot',docs_url=None,redoc_url=None,openapi_url=None)
 app.mount('/assets',StaticFiles(directory=str(BASE/'site'/'assets')),name='assets')
@@ -48,6 +50,7 @@ def initdb():
         CREATE TABLE IF NOT EXISTS login_failures(id INTEGER PRIMARY KEY, who TEXT NOT NULL, occurred_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(who,occurred_at);
         ''')
+        c.executescript(SCHEMA)
         if not c.execute('SELECT 1 FROM modules LIMIT 1').fetchone():
             curriculum=json.loads((BASE/'app'/'curriculum.json').read_text(encoding='utf-8'))
             for m in curriculum['modules']:
@@ -90,8 +93,8 @@ def e(text):
 
 def page(title,body,u=None):
     who=f'<div class="who">{e(u["name"])} · {e(u["role"])} <form method="post" action="/logout"><input type="hidden" name="csrf" value="{e(u["csrf"])}"><button class="ghost">Sign out</button></form></div>' if u else ''
-    nav=('<nav><a href="/dashboard">Dashboard</a><a href="/courses">Courses</a><a href="/simulations">Simulations</a><a href="/credentials">Credentials</a><a href="/evaluations">Evaluations</a><a href="/media">Media & manuals</a><a href="/account">Account security</a>' + ('<a href="/admin">Management</a>' if u['role']=='admin' else '')+'</nav>') if u else ''
-    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><link rel="icon" type="image/png" href="/assets/images/favicon.png"><link rel="apple-touch-icon" href="/assets/images/apple-touch-icon.png"><link rel="stylesheet" href="/portal.css"><title>{e(title)} · CareMed Academy</title></head><body><header><div class="top"><a href="/dashboard" class="logo"><img src="/assets/images/caremed-driver-logo.png" width="52" height="55" alt="CareMed Rides Driver"> <small>DRIVER ACADEMY</small></a>{who}</div>{nav}</header><main>{body}</main><footer>Secure pilot · Training content is DRAFT, not manufacturer-approved or HFS-approved. No dispatch authorization is issued by this system.</footer></body></html>''',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",'X-Frame-Options':'DENY'})
+    nav=('<nav><a href="/dashboard">Dashboard</a><a href="/courses">Courses</a><a href="/simulations">Simulations</a>' + ('<a href="/credentials">Credentials</a>' if u['role']=='driver' else '') + '<a href="/evaluations">Evaluations</a><a href="/media">Media & manuals</a><a href="/account">Account security</a>' + ('<a href="/admin">Management</a>' if u['role']=='admin' else '')+'</nav>') if u else ''
+    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><link rel="icon" type="image/png" href="/assets/images/favicon.png"><link rel="apple-touch-icon" href="/assets/images/apple-touch-icon.png"><link rel="stylesheet" href="/portal.css"><title>{e(title)} · CareMed Academy</title></head><body><header><div class="top"><a href="/dashboard" class="logo"><img src="/assets/images/caremed-driver-logo.png" width="52" height="55" alt="CareMed Rides Driver"> <small>DRIVER ACADEMY</small></a>{who}</div>{nav}</header><main>{body}</main><footer>Secure pilot · Training content is DRAFT, not manufacturer-approved or HFS-approved. {'Transport authorization enabled.' if TRANSPORT_ENABLED else 'Transport authorization disabled in this pilot.'}</footer></body></html>''',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",'X-Frame-Options':'DENY'})
 
 def msg(s):return '<p class="notice">'+e(s)+'</p>'
 def field(name,label,value='',kind='text',extra=''):
@@ -153,39 +156,201 @@ def logout(request:Request,csrf:str=Form(...)):
         with db() as c:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest,));audit(c,u['id'],'logout','account','Session terminated')
     response=redirect('/login');response.delete_cookie('caremed_session',path='/');return response
 
+def current_progress(c, driver_id):
+    state = driver_state(c, driver_id, TRANSPORT_ENABLED)
+    if state is None:
+        raise HTTPException(404, 'Driver not found')
+    return state
+
+
+def require_stage(state, stage):
+    if not state['active'] or state['stage'] < stage:
+        raise HTTPException(409, 'Complete the earlier onboarding requirements first')
+
+
+def credential_status_html(state):
+    items = []
+    for kind, status in state['credential_status'].items():
+        record = state['credentials'].get(kind)
+        date = f' (expires {e(record["expires_on"])})' if record else ''
+        items.append(f'<li>{e(CREDENTIALS[kind])} <strong>{e(status)}</strong>{date}</li>')
+    return '<ul>' + ''.join(items) + '</ul>'
+
+
+def exam_result(exam):
+    return f'{exam["correct"]} / {exam["total"]}' if exam else 'Awaiting examination'
+
+
 @app.get('/dashboard')
-def dashboard(request:Request):
-    u=require(request)
+def dashboard(request: Request):
+    u = require(request)
+    if u['role'] == 'instructor':
+        return redirect('/evaluations')
+    if u['role'] == 'admin':
+        return redirect('/admin')
     with db() as c:
-        passed=c.execute('SELECT count(distinct a.module_id) n FROM bank_attempts a JOIN modules m ON m.id=a.module_id WHERE a.user_id=? AND a.correct_count=a.total_count AND a.module_version=m.version AND m.status=\'approved\'',(u['id'],)).fetchone()['n']
-        approved=c.execute('SELECT count(*) n FROM modules WHERE status=\'approved\'').fetchone()['n']
-        pending=c.execute('SELECT count(*) n FROM evaluations e LEFT JOIN reviews r ON r.evaluation_id=e.id WHERE r.id IS NULL').fetchone()['n'] if u['role']!='driver' else 0
-    body='<div class="hero"><div><div class="eyebrow">CARED FOR. TRAINED WELL.</div><h1>Every ride begins with trust.</h1><p>Role-based training, credential checks and independently reviewed practical evaluations for Illinois accessible transportation.</p><a class="button" href="/courses">Explore training →</a></div><img src="/assets/images/caremed-hero.webp" alt="Illustrative accessible van and passenger at a clinic"></div>'
-    body+='<div class="stats">'+card('Approved course completions',f'<div class="big">{passed} / {approved}</div><p>Draft lessons do not count toward qualification.</p>')+card('Your role',f'<div class="big">{e(u["role"].title())}</div><p>Access is enforced on the server.</p>')+card('Awaiting secondary review',f'<div class="big">{pending}</div><p>Instructor and admin approvals are independently recorded.</p>')+'</div>'
-    body+=card('Qualification status',msg('NOT CLEARED FOR DISPATCH. CareMed has not approved the final curriculum, equipment manuals, manufacturer videos or operational authorization requirements. This system deliberately does not issue dispatch clearance.'))
-    return page('Dashboard',body,u)
+        c.execute('BEGIN')
+        state = current_progress(c, u['id'])
+    stage = state['stage']
+    steps = []
+    for index, name in enumerate(STAGES):
+        status = 'Complete' if index < stage else 'Current' if index == stage else 'Upcoming'
+        current = ' aria-current="step"' if index == stage else ''
+        steps.append(f'<li{current}><span>{e(name)}</span><strong>{status}</strong></li>')
+    next_actions = (
+        '<p>Confirm that you are starting driver onboarding.</p><form method="post" action="/onboarding/application">' + cs(u) + '<button>Submit application</button></form>',
+        '<p>Submit your driver license reference or wait for your administrator to verify it.</p><a class="button" href="/credentials">View credentials</a>',
+        '<p>Your administrator will record the background screening outcome.</p>',
+        '<p>Submit your Illinois HFS safety training certificate for verification.</p><a class="button" href="/credentials">View credentials</a>',
+        '<p>Complete the approved lessons and their knowledge checks.</p><a class="button" href="/courses">Open the academy</a>',
+        '<p>Take the written examination after completing the academy.</p><a class="button" href="/written-exam">Open written examination</a>',
+        '<p>Your instructor will document your supervised training.</p>',
+        '<p>Your instructor will schedule and document your practical examination.</p><a class="button" href="/evaluations">View practical examination</a>',
+        '<p>Management will review your practical examination and insurance eligibility before approving your record.</p><a class="button" href="/credentials">View credentials</a>',
+        '<p>Compliance approval is current. Transport authorization is disabled for this pilot.</p>',
+        '<p>Your CareMed transport authorization is current.</p>',
+    )
+    practical = state['practical']
+    practical_result = practical['result'].title() if practical else 'Awaiting examination'
+    if practical:
+        practical_result += ' / ' + (practical['decision'] or 'awaiting review')
+    body = f'<h1>Your onboarding journey</h1><div class="journey-layout"><div>{card("Next action", next_actions[stage])}'
+    body += card('Requirements', credential_status_html(state)) + card(
+        'Examination results',
+        f'<p>Written examination <strong>{e(exam_result(state["exam"]))}</strong></p><p>Practical examination <strong>{e(practical_result)}</strong></p>',
+    )
+    body += '</div>' + card('Onboarding stages', '<ol class="journey">' + ''.join(steps) + '</ol>') + '</div>'
+    body += '<div class="stats">' + card('Training completion', f'<p>{state["completed"]} of {state["total"]} lessons completed</p>')
+    body += card('Practical competency', '<p>Demonstrated</p>' if state['competent'] else '<p>Outstanding</p>')
+    body += card('Transport authorization', '<p>Authorized</p>' if state['authorized'] else '<p>Ineligible</p>') + '</div>'
+    return page('Onboarding', body, u)
+
+
+@app.post('/onboarding/application')
+def submit_application(request: Request, csrf: str = Form(...)):
+    u = require(request, {'driver'})
+    verify_csrf(request, u, csrf)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, u['id'])
+        require_stage(state, 0)
+        if state['stage'] == 0:
+            record_onboarding(c, u['id'], u['id'], 'application', True, 'Employee confirmed application')
+    return redirect('/dashboard')
+
+
+def record_onboarding(c, driver_id, actor_id, kind, passed, note):
+    c.execute(
+        'INSERT INTO onboarding_records(driver_id,actor_id,kind,passed,note,recorded_at) VALUES(?,?,?,?,?,?)',
+        (driver_id, actor_id, kind, int(passed), note, now()),
+    )
+    audit(c, actor_id, 'onboarding_' + kind, f'user:{driver_id}', f'passed={passed}')
+
+
+def written_questions(c):
+    return c.execute("""SELECT q.* FROM bank_questions q JOIN modules m ON m.id=q.module_id
+                        WHERE m.status='approved' ORDER BY m.id,q.ordinal""").fetchall()
+
+
+@app.get('/written-exam')
+def written_exam(request: Request):
+    u = require(request, {'driver'})
+    with db() as c:
+        c.execute('BEGIN')
+        state = current_progress(c, u['id'])
+        require_stage(state, 5)
+        questions = written_questions(c)
+    if state['checks'][5]:
+        return page('Written examination', card('Written examination passed', f'<p>{e(exam_result(state["exam"]))}</p>'), u)
+    body = '<h1>Written examination</h1><p>Submit a single set of answers for the approved academy curriculum. Every answer must be correct to pass.</p>'
+    body += '<form method="post" action="/written-exam">' + cs(u)
+    body += f'<input type="hidden" name="curriculum" value="{state["curriculum"]}">'
+    for number, question in enumerate(questions, 1):
+        body += f'<fieldset class="card"><legend>{number}. {e(question["prompt"])}</legend>'
+        for index, choice in enumerate(json.loads(question['choices'])):
+            body += f'<label class="radio"><input type="radio" name="question_{question["id"]}" value="{index}" required> {e(choice)}</label>'
+        body += '</fieldset>'
+    return page('Written examination', body + '<button>Submit examination</button></form>', u)
+
+
+@app.post('/written-exam')
+async def submit_written_exam(request: Request):
+    u = require(request, {'driver'})
+    form = await request.form()
+    verify_csrf(request, u, str(form.get('csrf', '')))
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, u['id'])
+        require_stage(state, 5)
+        if state['checks'][5]:
+            return redirect('/written-exam')
+        if form.get('curriculum') != state['curriculum']:
+            raise HTTPException(409, 'Curriculum changed. Reopen the examination.')
+        questions = written_questions(c)
+        if not questions:
+            raise HTTPException(409, 'No approved examination questions')
+        correct = 0
+        for question in questions:
+            try:
+                answer_index = int(form[f'question_{question["id"]}'])
+            except (ValueError, KeyError, TypeError):
+                raise HTTPException(400, 'Answer every examination question')
+            if answer_index not in range(len(json.loads(question['choices']))):
+                raise HTTPException(400, 'Invalid examination answer')
+            correct += answer_index == question['answer_index']
+        c.execute('INSERT INTO written_exams(driver_id,curriculum,correct,total,recorded_at) VALUES(?,?,?,?,?)',
+                  (u['id'], state['curriculum'], correct, len(questions), now()))
+        audit(c, u['id'], 'written_exam', f'user:{u["id"]}', f'{correct}/{len(questions)}')
+    return redirect('/dashboard')
+
+
+@app.get('/transport-authorization')
+def transport_authorization(request: Request):
+    u = require(request, {'driver'})
+    with db() as c:
+        c.execute('BEGIN')
+        state = current_progress(c, u['id'])
+    status = 200 if state['authorized'] else 403
+    return JSONResponse({'authorized': state['authorized']}, status_code=status, headers={'Cache-Control': 'no-store'})
+
 
 @app.get('/courses')
-def courses(request:Request):
-    u=require(request)
-    with db() as c:rows=c.execute('SELECT * FROM modules ORDER BY id').fetchall()
-    body='<h1>Learning paths</h1><p>Training content is in editorial review. Draft lessons are accessible for evaluation but do not count as approved completions.</p><div class="grid">'
-    for m in rows:
-        intro=m['body'].split('\n')[0]
-        body+=card(m['title'],f'<p>{e(intro)}</p><span class="tag">{e(m["status"].upper())} · v{m["version"]}</span><p><a class="button" href="/courses/{m["id"]}">Open lesson →</a></p>')
-    return page('Courses',body+'</div>',u)
+def courses(request: Request):
+    u = require(request)
+    with db() as c:
+        rows = c.execute("""SELECT m.*, EXISTS(
+                                SELECT 1 FROM bank_attempts a WHERE a.user_id=? AND a.module_id=m.id
+                                AND a.module_version=m.version AND a.total_count>0 AND a.correct_count=a.total_count
+                            ) completed FROM modules m ORDER BY m.id""", (u['id'],)).fetchall()
+    body = '<h1>Online Academy</h1><p>Complete each approved lesson and its knowledge check.</p><div class="grid">'
+    for module in rows:
+        status = 'Draft preview'
+        if module['status'] == 'approved':
+            status = 'Complete' if module['completed'] else 'Required'
+        intro = module['body'].split('\n', 1)[0]
+        details = f'<p>{e(intro)}</p><span class="tag">{status}</span>'
+        details += f'<p><a class="button" href="/courses/{module["id"]}">Open lesson</a></p>'
+        body += card(module['title'], details)
+    return page('Online Academy', body + '</div>', u)
+
+
 @app.get('/courses/{module_id}')
 def course(request:Request,module_id:int):
     u=require(request)
-    with db() as c:m=c.execute('SELECT * FROM modules WHERE id=?',(module_id,)).fetchone()
+    with db() as c:
+        c.execute('BEGIN')
+        m=c.execute('SELECT * FROM modules WHERE id=?',(module_id,)).fetchone()
+        state = current_progress(c, u['id']) if u['role'] == 'driver' else None
+        questions = c.execute('SELECT * FROM bank_questions WHERE module_id=? ORDER BY ordinal', (module_id,)).fetchall()
     if not m:raise HTTPException(404)
     body=f'<a href="/courses">← All lessons</a><h1>{e(m["title"])}</h1><p class="tag">{e(m["status"].upper())} · Version {m["version"]}</p><div class="card">'+''.join(f'<p>{e(part)}</p>' for part in m['body'].split('\n\n'))
     if module_id in (2,3):body+='<img class="illustration" src="/assets/images/vehicle-orientation.svg" alt="Conceptual rear-entry van diagram. Not operating instructions.">'
     if module_id in (2,3,4):
         vid='ramp-briefing' if module_id in (2,3) else 'securement-briefing'
         body+=f'<video controls preload="metadata" poster="/assets/images/academy-video-poster.webp"><source src="/assets/videos/{vid}.mp4" type="video/mp4"></video><p class="muted">12-second conceptual briefing, NOT manufacturer-approved demonstration.</p>'
-    choices=json.loads(m['choices']);q=m['body'].split('Knowledge check: ')[-1]
-    with db() as c: questions=c.execute('SELECT * FROM bank_questions WHERE module_id=? ORDER BY ordinal',(module_id,)).fetchall()
+    if state and state['stage'] < 4 and m['status'] == 'approved':
+        body += '<p>Complete the first four onboarding stages to submit the knowledge check.</p><a href="/dashboard">Back to onboarding</a>'
+        return page(m['title'], body + '</div>', u)
     body+=f'<h2>Three-question knowledge check</h2><form action="/courses/{module_id}/answer" method="post">'+cs(u)
     for question in questions:
         body+=f'<fieldset><legend>{question["ordinal"]+1}. {e(question["prompt"])}</legend>'
@@ -198,8 +363,11 @@ def course(request:Request,module_id:int):
 async def answer(request:Request,module_id:int):
     u=require(request);form=await request.form();verify_csrf(request,u,str(form.get('csrf','')))
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
         m=c.execute('SELECT * FROM modules WHERE id=?',(module_id,)).fetchone()
         if not m:raise HTTPException(404)
+        if u['role'] == 'driver' and m['status'] == 'approved':
+            require_stage(current_progress(c, u['id']), 4)
         questions=c.execute('SELECT * FROM bank_questions WHERE module_id=? ORDER BY ordinal',(module_id,)).fetchall()
         answers=[];feedback=[];correct=0
         for q in questions:
@@ -215,78 +383,341 @@ async def answer(request:Request,module_id:int):
     return page('Knowledge check',card('Assessment result',msg(label)+'<ol>'+''.join(feedback)+'</ol>'+f'<p><a class="button" href="/courses/{module_id}">Return to lesson</a></p>'),u)
 
 @app.get('/credentials')
-def credentials(request:Request):
-    u=require(request)
+def credentials(request: Request):
+    u = require(request, {'driver'})
     with db() as c:
-        rows=c.execute('SELECT x.*,v.name verifier FROM credentials x LEFT JOIN users v ON v.id=x.verified_by WHERE x.user_id=? ORDER BY x.kind',(u['id'],)).fetchall()
-    body='<h1>Credential registry</h1><p>Driver licenses and HFS certificates must be verified by an administrator. Do not enter patient information.</p>'
-    for x in rows:body+=card(x['kind'],f'<p>Reference: {e(x["reference"])} · Expires: {e(x["expires_on"])} · Status: <b>{e(x["status"])}</b></p><p>Verified by: {e(x["verifier"] or "Not yet verified")}</p>')
-    body+=card('Submit credential for review','<form method="post" action="/credentials">'+cs(u)+'<label>Credential type<select name="kind"><option value="driver_license">Driver license</option><option value="hfs_safety">HFS-approved safety training</option><option value="local_license">Local chauffeur / permit</option><option value="cpr">CPR / AED (where required by policy)</option></select></label>'+field('reference','Certificate or license reference')+field('expires_on','Expiration date',kind='date')+'<button>Submit for verification</button></form>')
-    return page('Credentials',body,u)
+        c.execute('BEGIN')
+        state = current_progress(c, u['id'])
+    body = '<h1>Credential registry</h1>'
+    body += card('Required credentials', credential_status_html(state))
+    for kind, record in state['credentials'].items():
+        body += card(CREDENTIALS.get(kind, kind),
+                     f'<p>Reference {e(record["reference"])} · Expires {e(record["expires_on"])} · {e(record["status"].title())}</p>')
+    options = ''.join(f'<option value="{kind}">{e(label)}</option>' for kind, label in CREDENTIALS.items())
+    if state['stage'] >= 1:
+        form = '<form method="post" action="/credentials">' + cs(u) + f'<label>Credential type<select name="kind">{options}</select></label>'
+        form += field('reference', 'Document or policy reference', extra='maxlength="120"')
+        form += field('expires_on', 'Expiration date', kind='date') + '<button>Submit for verification</button></form>'
+        body += card('Submit or renew a credential', form)
+    else:
+        body += '<p><a href="/dashboard">Submit your application</a> to begin credential verification.</p>'
+    return page('Credentials', body, u)
+
+
 @app.post('/credentials')
-def credentials_post(request:Request,csrf:str=Form(...),kind:str=Form(...),reference:str=Form(...),expires_on:str=Form(...)):
-    u=require(request);verify_csrf(request,u,csrf)
-    if kind not in {'driver_license','hfs_safety','local_license','cpr'} or not (2<=len(reference.strip())<=120) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',expires_on):raise HTTPException(400)
-    try:datetime.strptime(expires_on,'%Y-%m-%d')
-    except ValueError:raise HTTPException(400)
+def credentials_post(request: Request, csrf: str = Form(...), kind: str = Form(...),
+                     reference: str = Form(...), expires_on: str = Form(...)):
+    u = require(request, {'driver'})
+    verify_csrf(request, u, csrf)
+    reference = reference.strip()
+    expiry = parse_date(expires_on)
+    if kind not in CREDENTIALS or not 2 <= len(reference) <= 120 or expiry < illinois_today():
+        raise HTTPException(400, 'Enter a credential reference and a current expiration date')
     with db() as c:
-        c.execute('INSERT INTO credentials(user_id,kind,reference,expires_on,status,verified_by,verified_at) VALUES(?,?,?,?,\'pending\',NULL,NULL) ON CONFLICT(user_id,kind) DO UPDATE SET reference=excluded.reference,expires_on=excluded.expires_on,status=\'pending\',verified_by=NULL,verified_at=NULL',(u['id'],kind,reference.strip(),expires_on))
-        audit(c,u['id'],'credential_submitted',f'user:{u["id"]}',kind)
+        c.execute('BEGIN IMMEDIATE')
+        require_stage(current_progress(c, u['id']), 1)
+        result = c.execute("""INSERT INTO credentials(user_id,kind,reference,expires_on,status)
+                     VALUES(?,?,?,?,'pending') ON CONFLICT(user_id,kind) DO UPDATE SET
+                     reference=excluded.reference,expires_on=excluded.expires_on,
+                     status='pending',verified_by=NULL,verified_at=NULL
+                     WHERE credentials.reference<>excluded.reference OR credentials.expires_on<>excluded.expires_on
+                     OR credentials.status='rejected'""",
+                  (u['id'], kind, reference, expires_on))
+        if result.rowcount:
+            audit(c, u['id'], 'credential_submitted', f'user:{u["id"]}', kind)
     return redirect('/credentials')
 
+
+def parse_date(value):
+    try:
+        parsed = datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise HTTPException(400, 'Enter a valid date')
+    if parsed.isoformat() != value:
+        raise HTTPException(400, 'Enter a valid date')
+    return parsed
+
+
 CRITERIA=['Vehicle parked and secured on appropriate surface','Environment and ramp clearance assessed','Conversion/ramp identified by manual and serial','Ramp inspected according to exact maker instructions','Passenger consulted and consent obtained','Wheelchair handled within documented limitations','Approved wheelchair securement points identified','Four-point or installed approved securement correctly demonstrated','Occupant lap and shoulder restraints correctly demonstrated','Final restraint safety confirmation','Safe unloading demonstrated','Appropriate emergency escalation demonstrated']
+def practical_form(u, appointment):
+    form = '<form action="/evaluations" method="post">' + cs(u)
+    form += f'<input type="hidden" name="appointment_id" value="{appointment["id"]}">'
+    form += field('vehicle_reference', 'Vehicle VIN or fleet identifier', extra='maxlength="120"')
+    form += field('equipment_reference', 'Ramp and tie-down make, model and serial', extra='maxlength="120"')
+    form += field('observed_at', 'Observed date', appointment['scheduled_for'], kind='date')
+    form += '<fieldset><legend>Observed competencies</legend>'
+    for index, criterion in enumerate(CRITERIA):
+        form += f'<label class="radio"><input type="checkbox" name="checks" value="{index}"> {e(criterion)}</label>'
+    form += '</fieldset><label class="radio"><input type="checkbox" name="critical_pass" value="1"> I personally observed all critical safety steps, with no critical failure.</label>'
+    form += '<label>Result<select name="result"><option value="fail">Fail / remediation required</option><option value="pass">Pass</option></select></label>'
+    form += '<label>Observation and remediation notes<textarea name="notes" required minlength="20" maxlength="3000"></textarea></label>'
+    return form + '<button>Sign practical result</button></form>'
+
+
 @app.get('/evaluations')
-def evaluations(request:Request):
-    u=require(request)
+def evaluations(request: Request):
+    u = require(request)
     with db() as c:
-        if u['role']=='driver':
-            rows=c.execute('SELECT e.*,i.name instructor,r.decision FROM evaluations e JOIN users i ON i.id=e.instructor_id LEFT JOIN reviews r ON r.evaluation_id=e.id WHERE driver_id=? ORDER BY e.id DESC',(u['id'],)).fetchall()
-        else:rows=c.execute('SELECT e.*,d.name driver,i.name instructor,r.decision FROM evaluations e JOIN users d ON d.id=e.driver_id JOIN users i ON i.id=e.instructor_id LEFT JOIN reviews r ON r.evaluation_id=e.id ORDER BY e.id DESC LIMIT 100').fetchall()
-    body='<h1>Observed practical examinations</h1><p>Only instructors may submit observed evaluations. A different administrator must independently review the result.</p>'
-    for x in rows:
-        who=x['driver'] if 'driver' in x.keys() else u['name']
-        body+=card(f'Evaluation #{x["id"]} · {who}',f'<p>Instructor: {e(x["instructor"])} · Result: {e(x["result"].upper())} · Review: {e(x["decision"] or "AWAITING REVIEW")}</p><p>Vehicle: {e(x["vehicle_reference"])} · Equipment: {e(x["equipment_reference"])}</p>')
-    if u['role']=='instructor':
-        with db() as c:drivers=c.execute('SELECT id,name,email FROM users WHERE role=\'driver\' AND active=1 ORDER BY name').fetchall()
-        opts=''.join(f'<option value="{x["id"]}">{e(x["name"])} ({e(x["email"])})</option>' for x in drivers)
-        form='<form action="/evaluations" method="post">'+cs(u)+f'<label>Driver<select name="driver_id" required>{opts}</select></label>'+field('vehicle_reference','Vehicle VIN or fleet identifier')+field('equipment_reference','Actual ramp + tie-down make/model/serial')+field('observed_at','Observed date',kind='date')
-        form+='<fieldset><legend>Observed competencies (mark only when personally witnessed)</legend>'
-        for i,t in enumerate(CRITERIA):form+=f'<label class="radio"><input type="checkbox" name="checks" value="{i}"> {e(t)}</label>'
-        form+='</fieldset><label class="radio"><input type="checkbox" name="critical_pass" value="1"> I personally observed all critical safety steps and no critical failure occurred.</label><label>Assessment decision<select name="result"><option value="fail">Fail / requires remediation</option><option value="pass">Pass (only if all competencies demonstrated)</option></select></label><label>Observed details and remediation<textarea name="notes" required minlength="20" maxlength="3000"></textarea></label><button>Sign and submit observation</button></form>'
-        body+=card('New practical observation',form)
-    return page('Evaluations',body,u)
+        c.execute('BEGIN')
+        rows = c.execute("""SELECT ev.*,d.name driver,i.name instructor,r.decision
+                            FROM evaluations ev JOIN users d ON d.id=ev.driver_id
+                            JOIN users i ON i.id=ev.instructor_id LEFT JOIN reviews r ON r.evaluation_id=ev.id
+                            WHERE (? != 'driver' OR ev.driver_id=?) ORDER BY ev.id DESC LIMIT 100""",
+                         (u['role'], u['id'])).fetchall()
+        appointments = c.execute("""SELECT a.*,d.name driver,i.name instructor
+                                    FROM evaluation_appointments a JOIN users d ON d.id=a.driver_id
+                                    JOIN users i ON i.id=a.instructor_id
+                                    WHERE a.cancelled_at IS NULL AND a.evaluation_id IS NULL
+                                    AND (? != 'driver' OR a.driver_id=?)
+                                    AND (? != 'instructor' OR a.instructor_id=?)
+                                    ORDER BY a.scheduled_for,a.id""",
+                                 (u['role'], u['id'], u['role'], u['id'])).fetchall()
+        candidates = []
+        if u['role'] == 'instructor':
+            drivers = c.execute("SELECT id,name FROM users WHERE role='driver' AND active=1 ORDER BY name").fetchall()
+            booked = {row[0] for row in c.execute(
+                'SELECT driver_id FROM evaluation_appointments WHERE cancelled_at IS NULL AND evaluation_id IS NULL'
+            )}
+            candidates = [(driver, current_progress(c, driver['id'])['stage']) for driver in drivers]
+        appointment_states = {a['id']: current_progress(c, a['driver_id']) for a in appointments} if u['role'] == 'instructor' else {}
+
+    title = 'Instructor dashboard' if u['role'] == 'instructor' else 'Practical examinations'
+    body = f'<h1>{title}</h1>'
+    if u['role'] == 'instructor':
+        for stage, action, label in (
+            (6, 'supervision', 'Record supervised training'),
+            (7, 'appointments', 'Schedule practical examination'),
+        ):
+            options = ''.join(f'<option value="{d["id"]}">{e(d["name"])}</option>' for d, current in candidates
+                              if current == stage and (stage == 6 or d['id'] not in booked))
+            form = '<p>No drivers are ready for this step.</p>'
+            if options:
+                form = f'<form method="post" action="/evaluations/{action}">' + cs(u)
+                form += f'<label>Driver<select name="driver_id" required>{options}</select></label>'
+                if stage == 6:
+                    form += '<label>Training completed on<input type="date" name="training_date" required></label>'
+                    form += '<label>Supervised training completed<textarea name="notes" required minlength="10" maxlength="1000"></textarea></label>'
+                else:
+                    form += field('scheduled_for', 'Date and time (Central)', kind='datetime-local')
+                    form += field('location', 'Training location', extra='maxlength="160"')
+                form += f'<button>{label}</button></form>'
+            body += card(label, form)
+    if not appointments:
+        body += card('Scheduled practical examinations', '<p>No open appointments.</p>')
+    for appointment in appointments:
+        scheduled = appointment['scheduled_for'].replace('T', ' at ')
+        details = f'<p>{e(scheduled)} Central &middot; {e(appointment["location"])}</p><p>Instructor {e(appointment["instructor"])}</p>'
+        if u['role'] == 'instructor':
+            state = appointment_states[appointment['id']]
+            if state['stage'] == 7 and state['active'] and appointment['scheduled_for'] <= illinois_now().strftime('%Y-%m-%dT%H:%M'):
+                details += practical_form(u, appointment)
+            details += f'<form method="post" action="/evaluations/appointments/{appointment["id"]}/cancel">' + cs(u) + '<button>Cancel appointment</button></form>'
+        body += card(f'Appointment for {appointment["driver"]}', details)
+    history = []
+    for row in rows:
+        label = f'{e(row["driver"])} &middot; {e(row["observed_at"])} &middot; {e(row["result"].title())}'
+        details = f'<p>{e(row["instructor"])} &middot; {e(row["decision"] or "Awaiting review")}</p>'
+        details += f'<p>Vehicle {e(row["vehicle_reference"])} &middot; Equipment {e(row["equipment_reference"])}</p>'
+        if u['role'] != 'driver':
+            details += f'<p>{e(row["notes"])}</p>'
+        history.append(f'<details class="compliance-driver"><summary>{label}</summary>{details}</details>')
+    body += card('Examination history', ''.join(history) or '<p>No practical results recorded.</p>')
+    return page(title, body, u)
+
+
+@app.post('/evaluations/supervision')
+def complete_supervision(request: Request, driver_id: int = Form(...), csrf: str = Form(...),
+                         training_date: str = Form(...), notes: str = Form(...)):
+    u = require(request, {'instructor'})
+    verify_csrf(request, u, csrf)
+    if parse_date(training_date) > illinois_today() or not 10 <= len(notes.strip()) <= 1000:
+        raise HTTPException(400, 'Enter the completed training date and supervision notes')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, driver_id)
+        if state['stage'] != 6 or not state['active']:
+            raise HTTPException(409, 'Driver is not at supervised training')
+        if training_date < illinois_date(state['exam']['recorded_at']):
+            raise HTTPException(400, 'Supervised training must follow the written examination')
+        record_onboarding(c, driver_id, u['id'], 'supervision', True, f'{training_date} | {notes.strip()}')
+    return redirect('/evaluations')
+
+
+@app.post('/evaluations/appointments')
+def schedule_practical(request: Request, driver_id: int = Form(...), csrf: str = Form(...),
+                       scheduled_for: str = Form(...), location: str = Form(...)):
+    u = require(request, {'instructor'})
+    verify_csrf(request, u, csrf)
+    try:
+        scheduled = datetime.strptime(scheduled_for, '%Y-%m-%dT%H:%M')
+    except ValueError:
+        raise HTTPException(400, 'Enter a valid Central date and time')
+    if scheduled.isoformat(timespec='minutes') != scheduled_for or scheduled < illinois_now().replace(second=0, microsecond=0, tzinfo=None) or not 2 <= len(location.strip()) <= 160:
+        raise HTTPException(400, 'Enter a current or future appointment and a location')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, driver_id)
+        if state['stage'] != 7 or not state['active']:
+            raise HTTPException(409, 'Driver is not at the practical examination')
+        try:
+            appointment = c.execute('INSERT INTO evaluation_appointments(driver_id,instructor_id,scheduled_for,location) VALUES(?,?,?,?)',
+                                    (driver_id, u['id'], scheduled_for, location.strip()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'Driver already has an open appointment')
+        audit(c, u['id'], 'practical_scheduled', f'appointment:{appointment.lastrowid}', f'driver={driver_id}')
+    return redirect('/evaluations')
+
+
+@app.post('/evaluations/appointments/{appointment_id}/cancel')
+def cancel_practical(request: Request, appointment_id: int, csrf: str = Form(...)):
+    u = require(request, {'instructor'})
+    verify_csrf(request, u, csrf)
+    with db() as c:
+        result = c.execute("""UPDATE evaluation_appointments SET cancelled_at=?
+                              WHERE id=? AND instructor_id=? AND cancelled_at IS NULL AND evaluation_id IS NULL""",
+                           (now(), appointment_id, u['id']))
+        if result.rowcount != 1:
+            raise HTTPException(404, 'Open appointment not found')
+        audit(c, u['id'], 'practical_cancelled', f'appointment:{appointment_id}', 'Cancelled by assigned instructor')
+    return redirect('/evaluations')
+
+
 @app.post('/evaluations')
 async def evaluations_post(request:Request):
     u=require(request,{'instructor'});form=await request.form();verify_csrf(request,u,str(form.get('csrf','')))
-    try:driver_id=int(form['driver_id']);checks={int(x) for x in form.getlist('checks')};observed_at=datetime.strptime(str(form['observed_at']),'%Y-%m-%d').date().isoformat()
+    try:appointment_id=int(form['appointment_id']);checks={int(x) for x in form.getlist('checks')};observed_at=parse_date(str(form['observed_at'])).isoformat()
     except (KeyError,ValueError):raise HTTPException(400)
     if any(x not in range(len(CRITERIA)) for x in checks):raise HTTPException(400)
     result=str(form.get('result','fail'));critical=str(form.get('critical_pass',''))=='1'
     vehicle=str(form.get('vehicle_reference','')).strip();equipment=str(form.get('equipment_reference','')).strip();notes=str(form.get('notes','')).strip()
-    if len(vehicle)<3 or len(equipment)<5 or not 20<=len(notes)<=3000 or result not in {'pass','fail'}:raise HTTPException(400)
+    if not 3<=len(vehicle)<=120 or not 5<=len(equipment)<=120 or not 20<=len(notes)<=3000 or result not in {'pass','fail'}:raise HTTPException(400)
     if result=='pass' and (not critical or len(checks)!=len(CRITERIA)):raise HTTPException(400,'Cannot pass without every competency and critical-safety confirmation')
     with db() as c:
-        driver=c.execute('SELECT id FROM users WHERE id=? AND role=\'driver\' AND active=1',(driver_id,)).fetchone()
-        if not driver:raise HTTPException(400,'Invalid driver')
+        c.execute('BEGIN IMMEDIATE')
+        appointment = c.execute("""SELECT * FROM evaluation_appointments
+                                   WHERE id=? AND instructor_id=? AND cancelled_at IS NULL AND evaluation_id IS NULL""",
+                                (appointment_id, u['id'])).fetchone()
+        if not appointment:
+            raise HTTPException(404, 'Open appointment not found')
+        driver_id = appointment['driver_id']
+        state = current_progress(c, driver_id)
+        if state['stage'] != 7 or not state['active']:
+            raise HTTPException(409, 'Driver is not at the practical examination')
+        if not appointment['scheduled_for'][:10] <= observed_at <= illinois_today().isoformat() or appointment['scheduled_for'] > illinois_now().strftime('%Y-%m-%dT%H:%M'):
+            raise HTTPException(400, 'Observation must be on or after the appointment and cannot be in the future')
         cur=c.execute('INSERT INTO evaluations(driver_id,instructor_id,vehicle_reference,equipment_reference,checklist,critical_pass,result,notes,observed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(driver_id,u['id'],vehicle,equipment,json.dumps(sorted(checks)),int(critical),result,notes,observed_at,now()))
+        c.execute('UPDATE evaluation_appointments SET evaluation_id=? WHERE id=?', (cur.lastrowid, appointment_id))
         audit(c,u['id'],'evaluation_signed',f'evaluation:{cur.lastrowid}',f'Observed result: {result}; vehicle={vehicle}; complete={len(checks)}')
     return redirect('/evaluations')
+
+def compliance_dashboard(c, u, drivers):
+    entries = []
+    for driver in drivers:
+        state = current_progress(c, driver['id'])
+        stage = state['stage']
+        if not state['active']:
+            status = 'Inactive account'
+        elif state['authorized']:
+            status = 'Authorized for transport'
+        elif state['approved']:
+            status = 'Compliance approved'
+        elif state['snapshot']:
+            status = 'Ready for compliance approval'
+        else:
+            status = STAGES[min(stage, 9)]
+        summary = f'<strong>{e(driver["name"])}</strong> &middot; {e(status)}'
+        if state['renewals']:
+            summary += ' &middot; Renewal due'
+        detail = f'<p>Academy {state["completed"]}/{state["total"]} &middot; Written exam {e(exam_result(state["exam"]))} &middot; Practical competency {"demonstrated" if state["competent"] else "outstanding"}</p>'
+        detail += credential_status_html(state)
+        for kind, credential in state['credentials'].items():
+            if credential['status'] == 'verified':
+                detail += f'<form method="post" action="/admin/credential/{credential["id"]}">' + cs(u)
+                detail += f'<input type="hidden" name="revision" value="{credential_revision(credential)}"><input type="hidden" name="decision" value="withdrawn">'
+                detail += f'<button>Withdraw verification for {e(CREDENTIALS.get(kind, kind))}</button></form>'
+        if state['renewals']:
+            detail += '<p>Expired or expiring within 30 days &middot; ' + e(', '.join(state['renewals'])) + '</p>'
+        if state['supervision']:
+            detail += f'<p>Supervised training &middot; {e(state["supervision"]["note"])}</p>'
+        if state['practical'] and state['practical']['decision'] is None:
+            detail += '<p>Practical examination is awaiting independent review.</p>'
+        if state['active'] and stage >= 2:
+            screen_controls = '<label>Screening outcome<select name="decision"><option value="failed">Did not clear</option><option value="cleared">Cleared</option></select></label>'
+            if stage > 2:
+                screen_controls = '<input type="hidden" name="decision" value="failed">'
+            label = 'Record background screening' if stage == 2 else 'Withdraw screening clearance'
+            detail += f'<form method="post" action="/admin/drivers/{driver["id"]}/screening">' + cs(u) + screen_controls
+            detail += field('reference', 'Screening reference', extra='maxlength="120"') + f'<button>{label}</button></form>'
+        if state['snapshot'] or state['approved']:
+            decision = 'revoke' if state['approved'] else 'approve'
+            label = 'Withdraw compliance approval' if state['approved'] else 'Approve compliance'
+            detail += f'<form method="post" action="/admin/drivers/{driver["id"]}/compliance">' + cs(u)
+            detail += f'<input type="hidden" name="decision" value="{decision}"><input type="hidden" name="snapshot" value="{state["snapshot"]}">'
+            detail += field('notes', 'Decision notes', extra='minlength="10" maxlength="1000"') + f'<button>{label}</button></form>'
+        entries.append(f'<details class="compliance-driver"><summary>{summary}</summary>{detail}</details>')
+    return card('Driver compliance', ''.join(entries) or '<p>No driver accounts yet.</p>')
+
+
+@app.post('/admin/drivers/{driver_id}/screening')
+def admin_screening(request: Request, driver_id: int, csrf: str = Form(...),
+                    decision: str = Form(...), reference: str = Form(...)):
+    u = require(request, {'admin'})
+    verify_csrf(request, u, csrf)
+    if decision not in {'cleared', 'failed'} or not 2 <= len(reference.strip()) <= 120:
+        raise HTTPException(400, 'Enter the screening outcome and reference')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, driver_id)
+        require_stage(state, 2)
+        if decision == 'cleared' and state['stage'] != 2:
+            raise HTTPException(409, 'Screening is already cleared')
+        record_onboarding(c, driver_id, u['id'], 'screening', decision == 'cleared', reference.strip())
+    return redirect('/admin')
+
+
+@app.post('/admin/drivers/{driver_id}/compliance')
+def admin_compliance(request: Request, driver_id: int, csrf: str = Form(...),
+                     decision: str = Form(...), snapshot: str = Form(...), notes: str = Form(...)):
+    u = require(request, {'admin'})
+    verify_csrf(request, u, csrf)
+    if decision not in {'approve', 'revoke'} or not 10 <= len(notes.strip()) <= 1000:
+        raise HTTPException(400, 'Enter a valid decision and decision notes')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        state = current_progress(c, driver_id)
+        if not state['snapshot'] or state['snapshot'] != snapshot or state['approved'] != (decision == 'revoke'):
+            raise HTTPException(409, 'Driver compliance changed or prerequisites are incomplete')
+        approved_snapshot = snapshot if decision == 'approve' else None
+        c.execute('INSERT INTO compliance_decisions(driver_id,administrator_id,snapshot,note,recorded_at) VALUES(?,?,?,?,?)',
+                  (driver_id, u['id'], approved_snapshot, notes.strip(), now()))
+        audit(c, u['id'], 'compliance_' + decision, f'user:{driver_id}', f'decision={decision}')
+    return redirect('/admin')
+
+
+def credential_revision(credential):
+    return fingerprint([credential['reference'], credential['expires_on'], credential['verified_at']])
+
 
 @app.get('/admin')
 def admin(request:Request):
     u=require(request,{'admin'})
     with db() as c:
+        c.execute('BEGIN')
+        drivers = c.execute("SELECT id,name FROM users WHERE role='driver' ORDER BY name,id").fetchall()
+        compliance = compliance_dashboard(c, u, drivers)
         users=c.execute('SELECT id,email,name,role,active FROM users ORDER BY id DESC LIMIT 100').fetchall()
         pending=c.execute('SELECT x.*,u.name driver FROM credentials x JOIN users u ON u.id=x.user_id WHERE x.status=\'pending\' ORDER BY x.id').fetchall()
         reviews=c.execute('SELECT e.*,d.name driver,i.name instructor FROM evaluations e JOIN users d ON d.id=e.driver_id JOIN users i ON i.id=e.instructor_id LEFT JOIN reviews r ON r.evaluation_id=e.id WHERE r.id IS NULL ORDER BY e.id').fetchall()
         mods=c.execute('SELECT id,title,status,version FROM modules ORDER BY id').fetchall()
         logs=c.execute('SELECT a.*,u.email FROM audit a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 35').fetchall()
-    body='<h1>Administration & approval</h1>'+msg('The platform intentionally does not issue driver dispatch authorization or state/manufacturer certification.')
+    body = '<h1>Compliance dashboard</h1>' + compliance
+    if not TRANSPORT_ENABLED:
+        body += msg('Transport authorization is disabled in this pilot.')
     body+=card('Add employee','<form method="post" action="/admin/users">'+cs(u)+field('name','Name')+field('email','Email',kind='email')+field('password','Temporary password (share securely; require change before production)',kind='password',extra='minlength="14"')+'<label>Role<select name="role"><option value="driver">Driver</option><option value="instructor">Instructor</option><option value="admin">Administrator</option></select></label><button>Create account</button></form>')
     body+=card('Users','<div class="tablewrap"><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th></tr>'+''.join(f'<tr><td>{e(x["name"])}</td><td>{e(x["email"])}</td><td>{e(x["role"])}</td><td>{"Yes" if x["active"] else "No"}</td></tr>' for x in users)+'</table></div>')
     forms=''
     for x in pending:
-        forms+=f'<form method="post" action="/admin/credential/{x["id"]}">'+cs(u)+f'<b>{e(x["driver"])} · {e(x["kind"])}</b><p>Reference: {e(x["reference"])} · Expires {e(x["expires_on"])}</p><label>Decision<select name="decision"><option value="rejected">Reject</option><option value="verified">Verify (after independently checking original)</option></select></label><button>Record decision</button></form>'
+        forms+=f'<form method="post" action="/admin/credential/{x["id"]}">'+cs(u)+f'<input type="hidden" name="revision" value="{credential_revision(x)}"><b>{e(x["driver"])} · {e(x["kind"])}</b><p>Reference: {e(x["reference"])} · Expires {e(x["expires_on"])}</p><label>Decision<select name="decision"><option value="rejected">Reject</option><option value="verified">Verify (after independently checking original)</option></select></label><button>Record decision</button></form>'
     body+=card('Pending credential verification',forms or '<p>No pending credentials.</p>')
     review_forms=''
     for x in reviews:
@@ -308,16 +739,32 @@ def add_user(request:Request,csrf:str=Form(...),name:str=Form(...),email:str=For
         audit(c,u['id'],'user_created',f'user:{cur.lastrowid}',f'role={role}')
     return redirect('/admin')
 @app.post('/admin/credential/{credential_id}')
-def verify_credential(request:Request,credential_id:int,csrf:str=Form(...),decision:str=Form(...)):
-    u=require(request,{'admin'});verify_csrf(request,u,csrf)
-    if decision not in {'verified','rejected'}:raise HTTPException(400)
+def verify_credential(request: Request, credential_id: int, csrf: str = Form(...),
+                      decision: str = Form(...), revision: str = Form(...)):
+    u = require(request, {'admin'})
+    verify_csrf(request, u, csrf)
+    if decision not in {'verified', 'rejected', 'withdrawn'}:
+        raise HTTPException(400, 'Invalid credential decision')
     with db() as c:
-        x=c.execute('SELECT * FROM credentials WHERE id=? AND status=\'pending\'',(credential_id,)).fetchone()
-        if not x:raise HTTPException(404)
-        if x['user_id']==u['id']:raise HTTPException(403,'No self-verification')
-        c.execute('UPDATE credentials SET status=?,verified_by=?,verified_at=? WHERE id=?',(decision,u['id'],now(),credential_id))
-        audit(c,u['id'],'credential_'+decision,f'credential:{credential_id}',f'owner={x["user_id"]}')
+        c.execute('BEGIN IMMEDIATE')
+        prior_status = 'verified' if decision == 'withdrawn' else 'pending'
+        x = c.execute('SELECT * FROM credentials WHERE id=? AND status=?', (credential_id, prior_status)).fetchone()
+        if not x or credential_revision(x) != revision:
+            raise HTTPException(409, 'Credential changed. Reopen the compliance dashboard.')
+        if x['user_id'] == u['id']:
+            raise HTTPException(403, 'No self-verification')
+        if decision == 'verified':
+            state = current_progress(c, x['user_id'])
+            require_stage(state, 3 if x['kind'] == 'hfs_safety' else 1)
+            if x['expires_on'] < illinois_today().isoformat():
+                raise HTTPException(409, 'Credential has expired')
+        status = 'verified' if decision == 'verified' else 'rejected'
+        c.execute('UPDATE credentials SET status=?,verified_by=?,verified_at=? WHERE id=?',
+                  (status, u['id'], now(), credential_id))
+        audit(c, u['id'], 'credential_' + decision, f'credential:{credential_id}', f'owner={x["user_id"]}')
     return redirect('/admin')
+
+
 @app.post('/admin/review/{eval_id}')
 def admin_review(request:Request,eval_id:int,csrf:str=Form(...),decision:str=Form(...),notes:str=Form(...)):
     u=require(request,{'admin'});verify_csrf(request,u,csrf)
@@ -336,6 +783,7 @@ def admin_module(request:Request,module_id:int,csrf:str=Form(...),status:str=For
     u=require(request,{'admin'});verify_csrf(request,u,csrf)
     if status not in {'draft','approved'}:raise HTTPException(400)
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
         m=c.execute('SELECT * FROM modules WHERE id=?',(module_id,)).fetchone()
         if not m:raise HTTPException(404)
         if m['status']!=status:
