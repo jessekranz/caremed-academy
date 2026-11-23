@@ -9,7 +9,7 @@
       "intro": "Your responsibility is more than reaching the destination. Every trip must protect dignity, choice, and physical safety.",
       "outcomes": [
         "Describe the driver’s nonmedical role and service boundaries.",
-        "Explain the difference between care, assistance and clinical treatment.",
+        "Tell the difference between simple help a passenger directs and giving medication or clinical treatment.",
         "Use a consistent pre-trip and handoff workflow."
       ],
       "sections": [
@@ -22,20 +22,24 @@
           "CareMed plans to provide medical-appointment and personal trips. A driver may provide approved mobility assistance but must not represent themselves as a clinician, administer medication, physically transfer a passenger without authorization and training, or make clinical decisions."
         ],
         [
+          "Medication: helping versus administering",
+          "DRAFT POLICY, pending CareMed approval. You may give simple help that is not medical while the passenger stays in charge of their own medication: handing them their bag, opening a bottle or container they ask you to open, or holding a cup of water. You must not choose a medication or dose, put medication into the passenger’s hand or mouth for them, give injections, inhalers or eye drops, or decide whether they should take something. If the passenger seems confused, drowsy or unable to direct their own care, do not help: park safely and contact dispatch. Call 911 for any emergency."
+        ],
+        [
           "The handoff standard",
           "Confirm the correct passenger and destination, assess loading conditions, use an appropriate ramp and securement process, drive smoothly, and follow the contracted curb-to-curb, door-to-door or hand-to-hand service level. Do not leave a passenger in an unsafe situation."
         ]
       ],
       "q": [
         [
-          "A passenger asks you to administer medication. What should you do?",
+          "A passenger who is alert and directing their own care asks you to open their pill bottle and hand them their water so they can take their own medication. What do you do?",
           [
-            "Give the medication if the passenger requests it.",
-            "Explain the scope of your role and contact dispatch for approved assistance.",
-            "Ask another passenger to help."
+            "Refuse to touch anything related to medication.",
+            "Open the bottle and hand over the water; the passenger picks out and takes the medication themselves.",
+            "Pick out the right pills and hand them to the passenger."
           ],
           1,
-          "CareMed transportation personnel do not automatically have authority to perform medical treatment."
+          "Under the draft policy, simple help the passenger directs is allowed. Choosing, handing over or giving the medication itself is not."
         ],
         [
           "A trip is running late. What gets priority?",
@@ -68,7 +72,7 @@
       "intro": "Know where state requirements end, where federal rules apply, and when local licensing adds obligations.",
       "outcomes": [
         "Recognize Illinois Medicaid medicar driver certification requirements.",
-        "Identify separate Chicago and commercial-operation questions.",
+        "Understand that CareMed checks your local licenses before assigning trips in an area.",
         "Recognize when to escalate an uncertain trip or credential."
       ],
       "sections": [
@@ -81,8 +85,8 @@
           "License class, passenger capacity, insurer criteria, Chicago/local vehicle and chauffeur licensing, payer contracts, and HFS provider status may impose additional requirements. Compliance must be evaluated for each operation, not inferred from a generic NEMT label."
         ],
         [
-          "Evidence before assignment",
-          "A production system should validate license status, state-approved certification where applicable, onboarding, vehicle/ramp qualification, and practical instructor sign-off before assigning a wheelchair trip."
+          "CareMed checks your eligibility",
+          "Before you are assigned a wheelchair trip, CareMed staff verify your license status, state-approved certification where it applies, any local licenses for the areas you will serve (Chicago, for example, has its own), onboarding, vehicle and ramp qualification, and a practical instructor sign-off. You are not expected to research municipal law yourself. If you are ever offered a trip in an area where your local license is not on file, do not accept it; tell dispatch."
         ]
       ],
       "q": [
@@ -106,13 +110,14 @@
           "HFS specifies a three-year cycle."
         ],
         [
-          "A driver has never worked in Chicago. Should licensing be assumed identical to every suburb?",
+          "You are offered a trip into Chicago, but CareMed has not verified a Chicago license for you. What do you do?",
           [
-            "Yes",
-            "No, confirm local obligations"
+            "Accept it; the trip is short.",
+            "Decline it, tell dispatch, and send the missing license to CareMed compliance.",
+            "Accept it and send the license afterward."
           ],
           1,
-          "Municipal requirements may differ."
+          "Local licensing is checked before assignment. If a gap gets through, stop and report it rather than drive."
         ]
       ]
     },
@@ -957,6 +962,10 @@
       ],
       "sections": [
         [
+          "Status of this lesson",
+          "PLACEHOLDER. This lesson was written before the real CareMed Driver app was reviewed, so the trip steps below may not match the app. It will be rewritten from the app’s actual screens and trip statuses after CareMed and the app’s owner walk through it together. Learn the safety rules here; do not rely on the step names."
+        ],
+        [
           "A proposed workflow",
           "Assigned → Accepted → En route → Arrived → Boarding → Secured → In transit → Destination → Unloaded → Completed. These are proposed software states until validated against the real CareMed Driver app."
         ],
@@ -991,15 +1000,17 @@
           "A critical defect must stop unsafe dispatch."
         ],
         [
-          "Are the proposed app state names production-verified?",
+          "The app shows the ramp is not stowed, and you are ready to leave. What do you do?",
           [
-            "Yes",
-            "No, they require integration validation"
+            "Leave; the warning is probably wrong.",
+            "Stay parked, check that the ramp is stowed and locked, and contact dispatch if the warning will not clear.",
+            "Clear the warning and drive slowly."
           ],
           1,
-          "These are design specifications, not actual connected functionality."
+          "A safety warning means stop until you have checked the equipment yourself."
         ]
-      ]
+      ],
+      "placeholder": true
     },
     {
       "n": 18,
@@ -1352,6 +1363,242 @@
             ]
           ]
         }
+      ]
+    }
+  ],
+  "exam": [
+    {
+      "n": 1,
+      "q": [
+        "Mid-trip, a passenger asks you to give them their insulin injection because their hands are shaking. What do you do?",
+        [
+          "Give the injection carefully.",
+          "Tell them to wait until the destination and keep driving.",
+          "Pull over safely, explain that you cannot give medication, and contact dispatch; call 911 if they seem unwell."
+        ],
+        2,
+        "Giving an injection is administering medication. Shaking hands can also be a warning sign, so get help."
+      ]
+    },
+    {
+      "n": 2,
+      "q": [
+        "Your Illinois HFS safety training certificate expires next week. What should happen?",
+        [
+          "Renew it before it expires; once it lapses you cannot be assigned wheelchair trips.",
+          "Keep driving; expired certificates are fine for a while.",
+          "Ask a coworker to drive your trips until you get around to it."
+        ],
+        0,
+        "Required credentials must be current. CareMed flags them 30 days before they expire."
+      ]
+    },
+    {
+      "n": 3,
+      "q": [
+        "A passenger uses a communication device and takes a while to answer. Their caregiver offers to answer for them. What do you do?",
+        [
+          "Speak to the passenger directly and give them time; involve the caregiver only if the passenger wants that.",
+          "Skip your questions and start loading.",
+          "Let the caregiver answer to save time."
+        ],
+        0,
+        "The passenger decides how they communicate. Patience is part of the service."
+      ]
+    },
+    {
+      "n": 4,
+      "q": [
+        "On your pre-trip walkaround you find a cracked tail light and a frayed wheelchair tie-down strap. What do you do?",
+        [
+          "Report only the tail light, since it is a legal issue.",
+          "Report both; the van cannot take wheelchair trips until the strap is replaced.",
+          "Nothing; both are minor."
+        ],
+        1,
+        "A damaged tie-down is a critical safety defect for wheelchair service."
+      ]
+    },
+    {
+      "n": 5,
+      "q": [
+        "At pickup, the nearest spot is on a slope with traffic passing behind the van. What do you do?",
+        [
+          "Move to a level spot away from traffic with room for the full ramp and the wheelchair, even if it takes a few extra minutes.",
+          "Ask the passenger to roll down the slope to the van.",
+          "Deploy the ramp there quickly."
+        ],
+        0,
+        "The loading spot must be level, stable and clear of traffic before the ramp comes out."
+      ]
+    },
+    {
+      "n": 6,
+      "q": [
+        "While a passenger is on the ramp, you notice it shifting and a hinge making a new noise. What do you do?",
+        [
+          "Ask the passenger to move faster.",
+          "Stop, keep control of the wheelchair, get the passenger to a stable position using your trained procedure, then report the ramp and take it out of service.",
+          "Finish quickly before it gets worse."
+        ],
+        1,
+        "Passenger safety first; then a suspect ramp must not be used again until it is checked."
+      ]
+    },
+    {
+      "n": 7,
+      "q": [
+        "You have attached all four tie-downs, but the wheelchair can still rock forward a few inches. What do you do?",
+        [
+          "Go; the passenger’s lap belt will hold them.",
+          "Add an extra strap wherever it fits.",
+          "Re-tension and recheck the tie-downs following the manual before moving the van."
+        ],
+        2,
+        "Tie-downs must hold the wheelchair firmly. The occupant belt is a separate system."
+      ]
+    },
+    {
+      "n": 8,
+      "q": [
+        "A passenger asks you to leave the shoulder belt off because it is uncomfortable. What do you do?",
+        [
+          "Try adjusting the fit, explain why it matters, and follow CareMed’s policy for a passenger who declines, including telling dispatch.",
+          "Leave it off without saying anything.",
+          "Cancel the trip on the spot."
+        ],
+        0,
+        "Respect the passenger, explain the risk and follow the set policy rather than improvising."
+      ]
+    },
+    {
+      "n": 9,
+      "q": [
+        "A passenger in a powered wheelchair has been positioned for securement. What should happen with the wheelchair’s power?",
+        [
+          "Leave it on and in drive so the passenger can adjust.",
+          "It does not matter.",
+          "Turn it off once it is in position, following the wheelchair maker’s guidance."
+        ],
+        2,
+        "A powered chair left on can move unexpectedly during securement."
+      ]
+    },
+    {
+      "n": 10,
+      "q": [
+        "A passenger tells you they prefer to drive their own wheelchair up the ramp. What do you do?",
+        [
+          "Push them anyway to be safe.",
+          "Respect that, stay close and ready to help, and step in only if needed or asked.",
+          "Leave them to it and load the luggage."
+        ],
+        1,
+        "Support independence while staying in position to keep them safe."
+      ]
+    },
+    {
+      "n": 11,
+      "q": [
+        "You arrive for a medical drop-off and the clinic is closed. What do you do?",
+        [
+          "Keep the passenger with you, contact dispatch, and follow their direction.",
+          "Take the passenger home without telling anyone.",
+          "Drop the passenger at the door and leave."
+        ],
+        0,
+        "Do not leave a passenger somewhere unsafe or unplanned."
+      ]
+    },
+    {
+      "n": 12,
+      "q": [
+        "During a personal outing, the passenger asks to make an unplanned stop at a pharmacy. What do you do?",
+        [
+          "Refuse and keep driving.",
+          "Use the trip-change process with dispatch before making the stop.",
+          "Make the stop without telling anyone."
+        ],
+        1,
+        "Changes go through dispatch so the trip record and safety checks stay correct."
+      ]
+    },
+    {
+      "n": 13,
+      "q": [
+        "After a minor collision, the passenger says their neck hurts but otherwise seems fine. What do you do?",
+        [
+          "Call 911, keep them still and secured unless there is immediate danger such as fire, and contact dispatch.",
+          "Drive them to the hospital yourself.",
+          "Release the securement to check on them."
+        ],
+        0,
+        "Possible neck injuries should not be moved by untrained staff."
+      ]
+    },
+    {
+      "n": 14,
+      "q": [
+        "Freezing rain starts while you are carrying a wheelchair passenger. What do you do?",
+        [
+          "Keep your normal speed to stay on schedule.",
+          "Slow down, leave much more following distance, and tell dispatch you will be late.",
+          "Brake hard to test the traction."
+        ],
+        1,
+        "Schedule never outranks safe driving."
+      ]
+    },
+    {
+      "n": 15,
+      "q": [
+        "Someone at the destination asks you what the passenger’s appointment is for. What do you say?",
+        [
+          "Show them the trip details in the app.",
+          "Tell them, since they seem to know the passenger.",
+          "Nothing about it; passenger information is private."
+        ],
+        2,
+        "Share passenger information only with people authorized to have it."
+      ]
+    },
+    {
+      "n": 16,
+      "q": [
+        "While boarding, the wheelchair bumped the door frame. No one was hurt. What do you do?",
+        [
+          "Report it with objective facts through CareMed’s incident process.",
+          "Mention it to a coworker later.",
+          "Nothing; no one was hurt."
+        ],
+        0,
+        "Near misses and minor incidents are reported so problems are fixed early."
+      ]
+    },
+    {
+      "n": 17,
+      "q": [
+        "Dispatch sends you a message while you are driving. When do you read it?",
+        [
+          "Once you are safely parked.",
+          "Right away if traffic is light.",
+          "At the next red light."
+        ],
+        0,
+        "App use while driving is distracted driving, including at red lights."
+      ]
+    },
+    {
+      "n": 18,
+      "q": [
+        "Which of these must be complete before you drive wheelchair trips on your own?",
+        [
+          "Lessons, written exam, supervised training, a signed-off practical exam, verified credentials and compliance approval.",
+          "The practical exam only.",
+          "The online lessons only."
+        ],
+        0,
+        "Every onboarding step is required; none replaces another."
       ]
     }
   ]

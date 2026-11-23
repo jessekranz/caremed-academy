@@ -1,6 +1,6 @@
 # CareMed Driver Academy: Secure Pilot
 
-This release adds a **real server-side employee portal** to the previous visual training prototype: Argon2 password hashing, server-stored sessions, `HttpOnly`/`SameSite=Strict` cookies, CSRF protection, driver/instructor/admin roles, credential verification, 18 imported training lessons, 54 graded knowledge questions, 5 interactive decision simulations, signed practical observations, independent admin review and audit trail.
+This release adds a **real server-side employee portal** to the previous visual training prototype: Argon2 password hashing, server-stored sessions, `HttpOnly`/`SameSite=Strict` cookies, CSRF protection, driver/instructor/admin roles, credential verification, 18 imported training lessons, 54 graded lesson questions, a separate 18-question written exam bank, 5 interactive decision simulations, signed practical observations, independent admin review and audit trail.
 
 **It is a pilot, not an authorized production qualification service.** No manufacturer has approved the instructional material, no HFS safety training approval has been granted, and **no driver dispatch clearance is issued**. The previous 18-lesson visual preview is retained separately under `site/index.html` and still uses browser-local demonstration state. The new secure portal independently imports the 18 lessons and 54 questions into server-side records.
 
@@ -41,7 +41,7 @@ Log in to the secure portal to record real user-specific training activity withi
 
 The secure portal displays the driver's current stage, examination results and required credential status. Instructors document supervised training and schedule and sign practical examinations. Administrators verify records, independently review practical exams, and approve or withdraw driver compliance.
 
-The portal checks a current driver license, Illinois HFS safety training certificate and insurance eligibility. Local permits and CPR can be tracked as additional records. The written exam uses the approved academy question bank and requires all answers correct. The portal flags required records within 30 days of expiry.
+The portal checks a current driver license, Illinois HFS safety training certificate and insurance eligibility. Local permits and CPR can be tracked as additional records. The written exam uses its own scenario question bank (one question per approved lesson, none repeated from the lesson quizzes), shows the questions in random order, and requires all answers correct. The portal flags required records within 30 days of expiry.
 
 Transport authorization is disabled by default. If CareMed approves operational use, set `CAREMED_TRANSPORT_ENABLED=1` to enable the authorization check. `GET /transport-authorization` checks the signed-in driver's current status and returns 403 unless all gates and a current compliance approval are present. A dispatch integration would need to enforce those same requirements when accepting a trip. This repository has no trip acceptance system. Pending renewals and changed evidence require fresh verification and compliance approval. Previously recorded practical observations remain in the history. An appointment-linked practical examination is required for the onboarding workflow.
 
@@ -52,3 +52,9 @@ Five wrong passwords in 15 minutes, for one email or from one network address, b
 ## Preview website
 
 The visual preview in `site/` is published to GitHub Pages at https://jessekranz.github.io/caremed-academy/ on every push to `main` (`.github/workflows/pages.yml`). It is a prototype that keeps progress only in the viewer's browser. The secure portal in `app/` is not published there.
+
+## Updating an existing portal database
+
+Lessons and lesson questions are copied from `app/curriculum.json` only into an empty database. Editing that file does not change a database that already has lessons; the changes must be applied through a reviewed migration. The written exam bank is copied whenever the `exam_questions` table is empty, so an existing database picks it up on the next start.
+
+Review notes and the decisions still open are in `docs/REVIEW-RESPONSE-2026-11.md`.

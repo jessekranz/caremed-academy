@@ -83,7 +83,11 @@ def test_workflow(monkeypatch):
         exam_answers = {}
         for question in c.execute('SELECT * FROM bank_questions'):
             gradebook.setdefault(question['module_id'], {})[f'answer_{question["ordinal"]}'] = question['answer_index']
+        for question in c.execute('SELECT * FROM exam_questions'):
             exam_answers[f'question_{question["id"]}'] = question['answer_index']
+        assert len(exam_answers) == len(module_ids)
+        lesson_prompts = {row[0] for row in c.execute('SELECT prompt FROM bank_questions')}
+        assert not lesson_prompts & {row[0] for row in c.execute('SELECT prompt FROM exam_questions')}
     for module_id in module_ids:
         assert a.post(f'/admin/modules/{module_id}', data={'csrf': ac, 'status': 'approved'}).status_code == 303
         assert d.post(f'/courses/{module_id}/answer', data={'csrf': dc, **gradebook[module_id]}).status_code == 200

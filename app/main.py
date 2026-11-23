@@ -39,6 +39,7 @@ def initdb():
         CREATE TABLE IF NOT EXISTS modules(id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, answer_index INTEGER NOT NULL, choices TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('draft','approved')) DEFAULT 'draft', version INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), module_id INTEGER NOT NULL REFERENCES modules(id), module_version INTEGER NOT NULL, answer INTEGER NOT NULL, correct INTEGER NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bank_questions(id INTEGER PRIMARY KEY,module_id INTEGER NOT NULL REFERENCES modules(id),ordinal INTEGER NOT NULL,prompt TEXT NOT NULL,choices TEXT NOT NULL,answer_index INTEGER NOT NULL,rationale TEXT NOT NULL,UNIQUE(module_id,ordinal));
+        CREATE TABLE IF NOT EXISTS exam_questions(id INTEGER PRIMARY KEY,module_id INTEGER NOT NULL REFERENCES modules(id),ordinal INTEGER NOT NULL,prompt TEXT NOT NULL,choices TEXT NOT NULL,answer_index INTEGER NOT NULL,rationale TEXT NOT NULL,UNIQUE(module_id,ordinal));
         CREATE TABLE IF NOT EXISTS scenario_attempts(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),scenario_id TEXT NOT NULL,answers_json TEXT NOT NULL,correct_count INTEGER NOT NULL,total_count INTEGER NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bank_attempts(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),module_id INTEGER NOT NULL REFERENCES modules(id),module_version INTEGER NOT NULL,correct_count INTEGER NOT NULL,total_count INTEGER NOT NULL,answers_json TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS credentials(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL, reference TEXT NOT NULL, expires_on TEXT NOT NULL, verified_by INTEGER REFERENCES users(id), verified_at TEXT, status TEXT NOT NULL CHECK(status IN ('pending','verified','rejected')) DEFAULT 'pending', UNIQUE(user_id,kind));
@@ -51,13 +52,19 @@ def initdb():
         CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(who,occurred_at);
         ''')
         c.executescript(SCHEMA)
+        curriculum=json.loads((BASE/'app'/'curriculum.json').read_text(encoding='utf-8'))
         if not c.execute('SELECT 1 FROM modules LIMIT 1').fetchone():
-            curriculum=json.loads((BASE/'app'/'curriculum.json').read_text(encoding='utf-8'))
             for m in curriculum['modules']:
                 body='\n\n'.join([m['intro']]+[f'{section[0]}: {section[1]}' for section in m['sections']])
                 c.execute('INSERT INTO modules(id,title,body,answer_index,choices,status,version) VALUES(?,?,?,?,?,?,1)',(m['n'],m['title'],body,m['q'][0][2],json.dumps(m['q'][0][1]),'draft'))
                 for n,q in enumerate(m['q']):
                     c.execute('INSERT INTO bank_questions(module_id,ordinal,prompt,choices,answer_index,rationale) VALUES(?,?,?,?,?,?)',(m['n'],n,q[0],json.dumps(q[1]),q[2],q[3]))
+        # The written exam has its own question bank, separate from the lesson quizzes.
+        if not c.execute('SELECT 1 FROM exam_questions LIMIT 1').fetchone():
+            ordinals={}
+            for item in curriculum.get('exam',[]):
+                q=item['q'];ordinal=ordinals.get(item['n'],0);ordinals[item['n']]=ordinal+1
+                c.execute('INSERT INTO exam_questions(module_id,ordinal,prompt,choices,answer_index,rationale) VALUES(?,?,?,?,?,?)',(item['n'],ordinal,q[0],json.dumps(q[1]),q[2],q[3]))
 
 initdb()
 
@@ -248,7 +255,7 @@ def record_onboarding(c, driver_id, actor_id, kind, passed, note):
 
 
 def written_questions(c):
-    return c.execute("""SELECT q.* FROM bank_questions q JOIN modules m ON m.id=q.module_id
+    return c.execute("""SELECT q.* FROM exam_questions q JOIN modules m ON m.id=q.module_id
                         WHERE m.status='approved' ORDER BY m.id,q.ordinal""").fetchall()
 
 
@@ -259,10 +266,12 @@ def written_exam(request: Request):
         c.execute('BEGIN')
         state = current_progress(c, u['id'])
         require_stage(state, 5)
-        questions = written_questions(c)
+        questions = list(written_questions(c))
     if state['checks'][5]:
         return page('Written examination', card('Written examination passed', f'<p>{e(exam_result(state["exam"]))}</p>'), u)
-    body = '<h1>Written examination</h1><p>Submit a single set of answers for the approved academy curriculum. Every answer must be correct to pass.</p>'
+    secrets.SystemRandom().shuffle(questions)
+    body = ('<h1>Written examination</h1><p>These are new scenario questions, separate from the lesson quizzes, '
+            'shown in a random order. Every answer must be correct to pass.</p>')
     body += '<form method="post" action="/written-exam">' + cs(u)
     body += f'<input type="hidden" name="curriculum" value="{state["curriculum"]}">'
     for number, question in enumerate(questions, 1):
@@ -800,9 +809,10 @@ def media_library(request:Request):
     videos=[('Ramp safety orientation','ramp-briefing','Conceptual only. Do not use for ramp operation.'),('Restraint system awareness','securement-briefing','Not a manufacturer-approved tie-down demonstration.'),('Winter surface awareness','winter-briefing','Risk awareness, not a substitute for supervised practical training.')]
     body='<h1>Media and manufacturer reference center</h1>'+msg('These three short CareMed clips are editorial placeholders. No full-length manufacturer-approved CareMed videos have been filmed or authorized yet.')
     for title,file,desc in videos:
-        body+=card(title,f'<video controls preload="metadata" poster="/assets/images/academy-video-poster.webp"><source src="/assets/videos/{file}.mp4" type="video/mp4"></video><p>{e(desc)}</p>')
+        body+=card(title,f'<video controls preload="metadata" poster="/assets/images/academy-video-poster.webp"><source src="/assets/videos/{file}.mp4" type="video/mp4"></video><p>{e(desc)} Plays at 0.4× speed so each caption can be read.</p>')
     refs=[('Illinois HFS Safety Training','https://hfs.illinois.gov/impact/safetytraining.html'),('BraunAbility commercial Sienna reference · verify conversion first','https://www.braunability.com/us/en/commercial/mobility-products/wheelchair-vans/rear-entry-toyota-sienna-hybrid-wheelchair-minivan.html'),('VMI Sienna manual reference · verify conversion first','https://www.vantagemobility.com/wp-content/uploads/2024/05/Toyota_RearEntry_2024_OwnersManual_FINAL.pdf'),('Q’STRAINT manufacturer securement training · verify WTORS first','https://training.qstraint.com/aqademy-overview/')]
     body+=card('Manufacturer and regulatory resources','<p>External sites are references only; no implied endorsement or approval.</p><ul>'+''.join(f'<li><a href="{e(url)}" rel="noopener noreferrer" target="_blank">{e(name)}</a></li>' for name,url in refs)+'</ul>')
+    body+='<script src="/assets/js/slow-video.js" defer></script>'
     return page('Media and manuals',body,u)
 
 @app.get('/account')
